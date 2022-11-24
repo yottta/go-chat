@@ -20,7 +20,8 @@ type handler struct {
 	users        *CList[*domain.Chat]
 	chat         *tview.List
 	messageField *tview.InputField
-	app          *tview.Application
+
+	app *tview.Application
 
 	currentChat *domain.Chat
 	s           data.Store
@@ -61,8 +62,9 @@ func New(store data.Store) Handler {
 		users:        users,
 		chat:         chat,
 		messageField: messageField,
-		app:          application,
-		s:            store,
+
+		app: application,
+		s:   store,
 	}
 }
 
@@ -81,8 +83,7 @@ func (h *handler) Start(ctx context.Context) error {
 			AddItem(h.messageField, 0, 1, false),
 			0, 5, false)
 
-	h.app.SetFocus(h.users)
-	if err := h.app.SetRoot(flex, true).EnableMouse(false).Run(); err != nil {
+	if err := h.app.SetRoot(flex, true).SetFocus(h.users).Run(); err != nil {
 		return err
 	}
 	return nil
@@ -118,12 +119,17 @@ func (h *handler) bindActions() {
 	h.messageField.SetDoneFunc(func(key tcell.Key) {
 		txt := strings.TrimSpace(h.messageField.GetText())
 		if len(txt) > 0 {
-			h.s.AddChatLine(domain.Message{
+			if err := h.s.AddChatLine(domain.Message{
 				ChatId: h.currentChat.Id,
 				UserId: h.s.CurrentUser().Id,
 				Text:   txt,
 				At:     time.Now(),
-			})
+			}); err != nil {
+				h.addChatMessage(domain.Message{
+					Text:         err.Error(),
+					ErrorMessage: true,
+				})
+			}
 		}
 		h.messageField.SetText("")
 	})
@@ -152,11 +158,6 @@ func (h *handler) bindActions() {
 			h.app.SetFocus(focusNext(h.app.GetFocus()))
 			return nil
 		}
-
-		//// Ctrl+C
-		//if event.Key() == 3 && event.Modifiers() == tcell.ModCtrl {
-		//	return nil
-		//}
 		return event
 	})
 	h.app.SetFocus(h.messageField)

@@ -4,10 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/gob"
+	"errors"
 	"fmt"
 	"github.com/yottta/chat/client/domain"
+	"io"
 	"log"
+	"math"
 	"net"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -87,18 +91,13 @@ func (c *connection) Start(ctx context.Context) {
 			}
 		}
 	}()
-	// TODO, needs to test this for bigger messages
-	b := make([]byte, 1024)
 	for {
-		n, err := c.conn.Read(b)
+		m, err := ReadNetworkMessage(c.conn)
 		if err != nil {
+			if !errors.Is(err, io.EOF) {
+				fmt.Printf("failed to read network message from connection %s", err)
+			}
 			return
-		}
-
-		var m NetworkMsg
-		if err := gob.NewDecoder(bytes.NewReader(b[:n])).Decode(&m); err != nil {
-			log.Printf("failed to decode network message")
-			continue
 		}
 
 		c.receiveMsgCallback(domain.Message{
@@ -160,7 +159,16 @@ func (c *connection) writeToConn(m domain.Message) {
 		log.Printf("failed to encode message to send it over network: %s", err)
 		return
 	}
-	if _, err := c.conn.Write(b.Bytes()); err != nil {
+
+	msgEncoded := b.Bytes()
+	if len(msgEncoded) > math.MaxUint16 {
+		log.Printf("error sending message because it's too big")
+		return
+	}
+	sizeStr := fmt.Sprintf("%05d", len(b.Bytes()))
+	out := append([]byte(sizeStr), msgEncoded...)
+
+	if _, err := c.conn.Write(out); err != nil {
 		log.Printf("failed to write the message into the socket: %s", err)
 	}
 }
@@ -170,4 +178,34 @@ type NetworkMsg struct {
 	ChatId  string
 	Message string
 	At      time.Time
+}
+
+// ReadNetworkMessage reads from the given net.Conn and returns a NetworkMsg.
+// This method expects that on the first 5 bytes of the stream contain the size of the payload expressed as a %05d formatted string.
+// If it does not find the 5 bytes containing the size it returns error.
+// The bytes following the size ones should be encoded using gob.NewEncoder.
+func ReadNetworkMessage(c io.Reader) (*NetworkMsg, error) {
+	sizeRead := make([]byte, 5)
+	n, err := io.ReadFull(c, sizeRead)
+	if err != nil {
+		return nil, err
+	}
+	if n != 5 {
+		return nil, fmt.Errorf("wrong number of bytes read for determining the size of the payload. read %d", n)
+	}
+	size, err := strconv.Atoi(string(sizeRead))
+	if err != nil {
+		return nil, fmt.Errorf("invalid content message as the size of the message is unparseable: %s", err)
+	}
+	msg := make([]byte, size)
+	n, err = io.ReadFull(c, msg)
+	if err != nil {
+		return nil, err
+	}
+
+	var m NetworkMsg
+	if err := gob.NewDecoder(bytes.NewReader(msg)).Decode(&m); err != nil {
+		return nil, err
+	}
+	return &m, nil
 }

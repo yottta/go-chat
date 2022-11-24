@@ -12,6 +12,8 @@ import (
 	"sync"
 )
 
+const maxMsgLen = 15000
+
 type store struct {
 	currentUser domain.User
 
@@ -70,6 +72,9 @@ func NewStore(ctx context.Context, currentUser domain.User) data.Store {
 // In case that the targeted chat does not contain the targeted user, an error is raised.
 // Once the message is added to the store, the message is scheduled to be sent to the handlers registered using #RegisterMessageHandler.
 func (s *store) AddChatLine(message domain.Message) error {
+	if len(message.Text) > maxMsgLen {
+		return fmt.Errorf("messages limited to only %d characters", maxMsgLen)
+	}
 	s.m.Lock()
 	defer s.m.Unlock()
 	c, ok := s.chats[message.ChatId]

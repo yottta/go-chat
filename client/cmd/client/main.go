@@ -4,12 +4,6 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
-	"github.com/yottta/chat/client/domain"
-	"github.com/yottta/chat/client/infra/data"
-	"github.com/yottta/chat/client/infra/data/inmemory"
-	"github.com/yottta/chat/client/infra/http/directory"
-	"github.com/yottta/chat/client/infra/socket"
-	"github.com/yottta/chat/client/infra/tui"
 	"log"
 	"os"
 	"os/signal"
@@ -19,6 +13,13 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/yottta/chat/client/domain"
+	"github.com/yottta/chat/client/infra/data"
+	"github.com/yottta/chat/client/infra/data/inmemory"
+	"github.com/yottta/chat/client/infra/http/directory"
+	"github.com/yottta/chat/client/infra/socket"
+	"github.com/yottta/chat/client/infra/tui"
 )
 
 var (
@@ -53,6 +54,11 @@ func main() {
 		log.Fatalf("failed to get local address: %s", err)
 	}
 
+	// start listening for new connections
+	if err := so.Listen(ctx); err != nil {
+		log.Fatal(err)
+	}
+
 	currentUserId := base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("%s_%d", so.LocalIP(), so.AllocatedPort())))
 	// prepare the store to hold the messages exchanged
 	store := inmemory.NewStore(
@@ -85,15 +91,6 @@ func main() {
 				ping(ctx, dc, store.CurrentUser())
 				loadClients(ctx, dc, store)
 			}
-		}
-	}()
-
-	// start listening for new connections
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		if err := so.Listen(ctx); err != nil {
-			log.Fatal(err)
 		}
 	}()
 

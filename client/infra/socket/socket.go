@@ -1,19 +1,17 @@
 package socket
 
 import (
-	"bytes"
 	"context"
-	"encoding/gob"
 	"errors"
 	"fmt"
 	"github.com/yottta/chat/client/domain"
 	"github.com/yottta/chat/client/infra/data"
 	"github.com/yottta/chat/client/infra/socket/conn"
-	"io"
 	"log"
 	"net"
 	"strconv"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -37,17 +35,12 @@ type socket struct {
 }
 
 func NewSocket() (Socket, error) {
-	port, err := findUnusedPort()
-	if err != nil {
-		return nil, err
-	}
 	ip, err := findIp()
 	if err != nil {
 		return nil, err
 	}
 	return &socket{
-		port: port,
-		ip:   ip,
+		ip: ip,
 
 		cm:          &sync.Mutex{},
 		connections: map[string]conn.Conn{},
@@ -56,21 +49,36 @@ func NewSocket() (Socket, error) {
 
 func (s *socket) RegisterStore(store data.Store) {
 	s.store = store
+	s.store.RegisterMessageHandler(func(ctx context.Context, m domain.Message) {
+		if m.UserId != s.store.CurrentUser().Id {
+			return
+		}
+		s.handleOutgoingMessages(ctx, m)
+	})
+}
+
+const portSeed = 1000
+
+func (s *socket) listenOnAvailablePort() (net.Listener, int, error) {
+	for i := portSeed; i < 65535; i++ {
+		l, err := net.Listen("tcp", ":"+strconv.Itoa(i))
+		if err != nil {
+			if errors.Is(err, syscall.EADDRINUSE) {
+				continue
+			}
+			return nil, 0, err
+		}
+		return l, i, nil
+	}
+	return nil, 0, fmt.Errorf("no available port")
 }
 
 func (s *socket) Listen(ctx context.Context) error {
-	if s.store == nil {
-		return fmt.Errorf("no store registered")
-	}
-	l, err := net.Listen("tcp", ":"+strconv.Itoa(s.port))
+	l, port, err := s.listenOnAvailablePort()
 	if err != nil {
 		return err
 	}
-	defer func() {
-		if err := l.Close(); err != nil {
-			fmt.Printf("error closing the socket listener: %s", err)
-		}
-	}()
+	s.port = port
 	go func() {
 		<-ctx.Done()
 		log.Println("closing socket client")
@@ -79,21 +87,10 @@ func (s *socket) Listen(ctx context.Context) error {
 		}
 	}()
 
-	var wg sync.WaitGroup
-	wg.Add(1)
 	go func() {
-		defer wg.Done()
 		s.listenIncomingConns(ctx, l)
 	}()
 
-	s.store.RegisterMessageHandler(func(ctx context.Context, m domain.Message) {
-		if m.UserId != s.store.CurrentUser().Id {
-			return
-		}
-		s.handleOutgoingMessages(ctx, m)
-	})
-
-	wg.Wait()
 	return nil
 }
 
@@ -119,21 +116,13 @@ func (s *socket) AllocatedPort() int {
 
 func (s *socket) handleNewConn(ctx context.Context, establishedConn net.Conn) {
 	_ = establishedConn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	b := make([]byte, 1024)
-	n, err := establishedConn.Read(b)
+
+	m, err := conn.ReadNetworkMessage(establishedConn)
 	if err != nil {
-		if errors.Is(err, io.EOF) {
-			return
-		}
-		log.Printf("error acknowledging the connection")
+		fmt.Printf("error reading network message: %s", err)
 		return
 	}
 	_ = establishedConn.SetReadDeadline(time.Time{})
-	var m conn.NetworkMsg
-	if err := gob.NewDecoder(bytes.NewReader(b[:n])).Decode(&m); err != nil {
-		log.Printf("failed to decode network message during creating connection")
-		return
-	}
 
 	chat, err := s.store.GetChat(m.ChatId)
 	if err != nil {
@@ -147,7 +136,13 @@ func (s *socket) handleNewConn(ctx context.Context, establishedConn net.Conn) {
 		log.Printf("failed to ack the connection as the chat id (%s) does not contain the received user id %s", m.ChatId, m.UserId)
 		return
 	}
-	c := conn.NewConnection(*user, *chat, establishedConn, s.removeConn, addReceivedMessageToStore(s.store))
+	c := conn.NewConnection(
+		*user,
+		*chat,
+		establishedConn,
+		s.removeConn,
+		addReceivedMessageToStore(s.store),
+	)
 	go c.Start(ctx)
 	s.storeConn(user.Id, c)
 	if err := s.store.AddChatLine(domain.Message{
@@ -254,22 +249,6 @@ func findIp() (string, error) {
 		}
 	}
 	return "", fmt.Errorf("could not figure out the IP of your machine")
-}
-
-const portSeed = 1000
-
-func findUnusedPort() (int, error) {
-	for i := portSeed; i < 65535; i++ {
-		c, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(i)), time.Second*1)
-		if err != nil {
-			return i, nil
-		}
-		if c != nil {
-			_ = c.Close()
-			continue
-		}
-	}
-	return 0, fmt.Errorf("no port available")
 }
 
 func addReceivedMessageToStore(store data.Store) func(m domain.Message) {
