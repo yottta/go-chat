@@ -1,0 +1,26 @@
+version: "3.9"
+services:
+  directory:
+    container_name: chat-directory
+    platform: linux/amd64
+    networks:
+      chat-bridge: {}
+    build:
+      context: "./directory"
+    ports:
+      - "8080:8080"
+  client1:
+    build: ./client
+    networks:
+      chat-bridge: { }
+    ports:
+      - "1000:1000"
+    environment:
+      USER_NAME: bob
+      SERVER_URL: http://chat-directory:8080
+#  client2:
+#    build: ./client
+#    ports:
+#      - "1000:1000"
+networks:
+  chat-bridge: {}
